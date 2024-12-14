@@ -1,18 +1,13 @@
 #include "../include/ft_ping.h"
-#define INFINITY (1.0 / 0.0)
-#include <limits.h>
 
 static volatile sig_atomic_t g_stop_ping = 0;
-static int sock_fd = -1;  // Global socket descriptor for signal handler access
+static int sock_fd = -1;
 
 void handle_signal(int signum) {
     if (signum == SIGINT) {
         g_stop_ping = 1;
-        
-        // Close socket to interrupt blocking receive
         if (sock_fd != -1) {
-            close(sock_fd);
-            sock_fd = -1;
+            shutdown(sock_fd, SHUT_RDWR);
         }
     }
 }
@@ -26,7 +21,7 @@ unsigned short calculate_checksum(void *b, int len) {
         sum += *buf++;
 
     if (len == 1)
-        sum += *(unsigned char *)buf;
+        sum += *(unsigned char*)buf;
 
     sum = (sum >> 16) + (sum & 0xFFFF);
     sum += (sum >> 16);
@@ -34,170 +29,198 @@ unsigned short calculate_checksum(void *b, int len) {
     return result;
 }
 
+double get_time_ms(struct timeval *t) {
+    return (t->tv_sec * 1000.0 + t->tv_usec / 1000.0);
+}
+
+void print_statistics(const t_ping_stats *stats, const char *target) {
+    double loss_percent = 0;
+    if (stats->packets_sent > 0) {
+        loss_percent = ((stats->packets_sent - stats->packets_received) * 100.0) / stats->packets_sent;
+    }
+
+    printf("\n--- %s ping statistics ---\n", target);
+    printf("%d packets transmitted, %d packets received, %.1f%% packet loss\n",
+           stats->packets_sent, stats->packets_received, loss_percent);
+
+    if (stats->packets_received > 0) {
+        double avg = stats->rtt_sum / stats->packets_received;
+        double mdev = sqrt((stats->rtt_sum_sq / stats->packets_received) - (avg * avg));
+        printf("round-trip min/avg/max/stddev = %.3f/%.3f/%.3f/%.3f ms\n",
+               stats->rtt_min, avg, stats->rtt_max, mdev);
+    }
+}
+
 int send_ping(t_ping_options *options) {
-    struct sockaddr_in target;
-    struct icmphdr *icmp_header;
+    struct sockaddr_in dest_addr;
+    struct icmphdr icmp_header;
     char packet[MAX_PACKET_SIZE];
-    struct timeval start, end;
-    int packets_sent = 0, packets_recv = 0;
+    char recv_buffer[MAX_PACKET_SIZE];
+    struct timeval start, end, timeout;
+    t_ping_stats stats = {0};
     struct sigaction sa;
-    
-    // Statistics tracking
-    double rtt_sum = 0.0;
-    double rtt_sum_sq = 0.0;
-    double rtt_min = INFINITY;
-    double rtt_max = 0.0;
+    int sequence = 0;
+    socklen_t addr_len = sizeof(struct sockaddr_in);
+    int is_localhost = 0;
+    struct hostent *host;
+
+    // Initialize statistics
+    stats.rtt_min = INFINITY;
 
     // Create raw socket
     sock_fd = socket(AF_INET, SOCK_RAW, IPPROTO_ICMP);
     if (sock_fd < 0) {
-        perror("socket");
+        perror("ft_ping: socket");
         return -1;
     }
 
     // Set up signal handling
     memset(&sa, 0, sizeof(sa));
     sa.sa_handler = handle_signal;
-    sigemptyset(&sa.sa_mask);
     sigaction(SIGINT, &sa, NULL);
 
-    // Set TTL
-    if (setsockopt(sock_fd, IPPROTO_IP, IP_TTL, &options->ttl, sizeof(options->ttl)) < 0) {
-        perror("setsockopt");
+    // Set up destination address
+    host = gethostbyname(options->target);
+    if (!host) {
+        fprintf(stderr, "ft_ping: unknown host %s\n", options->target);
         close(sock_fd);
         return -1;
     }
 
-    // Set socket timeout to prevent indefinite blocking
-    struct timeval timeout;
-    timeout.tv_sec = 1;  // 1 second timeout
+    memset(&dest_addr, 0, sizeof(dest_addr));
+    dest_addr.sin_family = AF_INET;
+    memcpy(&dest_addr.sin_addr, host->h_addr, host->h_length);
+
+    // Check if target is localhost
+    is_localhost = (dest_addr.sin_addr.s_addr == htonl(INADDR_LOOPBACK) ||
+                   strcmp(options->target, "localhost") == 0 ||
+                   strcmp(options->target, "127.0.0.1") == 0);
+
+    // Set socket options
+    if (is_localhost) {
+        int ttl = 64;  // Fixed TTL for localhost
+        if (setsockopt(sock_fd, IPPROTO_IP, IP_TTL, &ttl, sizeof(ttl)) != 0) {
+            perror("ft_ping: setsockopt TTL");
+            close(sock_fd);
+            return -1;
+        }
+    } else {
+        if (setsockopt(sock_fd, IPPROTO_IP, IP_TTL, &options->ttl, sizeof(options->ttl)) != 0) {
+            perror("ft_ping: setsockopt TTL");
+            close(sock_fd);
+            return -1;
+        }
+    }
+
+    // Set receive timeout
+    timeout.tv_sec = 1;
     timeout.tv_usec = 0;
     if (setsockopt(sock_fd, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout)) < 0) {
-        perror("setsockopt timeout");
+        perror("ft_ping: setsockopt SO_RCVTIMEO");
         close(sock_fd);
         return -1;
     }
 
-    // Resolve hostname
-    struct hostent *host = gethostbyname(options->target);
-    if (!host) {
-        herror("gethostbyname");
-        close(sock_fd);
-        return -1;
+    // Show initial message
+    if (options->verbose) {
+        printf("PING %s (%s): %d data bytes, id 0x%x = %u\n",
+               options->target,
+               inet_ntoa(dest_addr.sin_addr),
+               options->packet_size,
+               getpid() & 0xFFFF,
+               getpid() & 0xFFFF);
+    } else {
+        printf("PING %s (%s): %d data bytes\n",
+               options->target,
+               inet_ntoa(dest_addr.sin_addr),
+               options->packet_size);
     }
 
-    memset(&target, 0, sizeof(target));
-    target.sin_family = AF_INET;
-    memcpy(&target.sin_addr, host->h_addr, host->h_length);
-
-    printf("PING %s (%s) %d bytes of data.\n", 
-           options->target, 
-           inet_ntoa(target.sin_addr), 
-           options->packet_size);
-
-    // Remove count limit if not specified
-    int max_packets = (options->count > 0) ? options->count : INT_MAX;
-
-    while (packets_sent < max_packets && !g_stop_ping) {
-        // Prepare ICMP packet
+    // Main ping loop
+    while (!g_stop_ping && (options->count == 0 || sequence < options->count)) {
+        memset(&icmp_header, 0, sizeof(icmp_header));
         memset(packet, 0, sizeof(packet));
-        icmp_header = (struct icmphdr *)packet;
 
-        icmp_header->type = ICMP_ECHO;
-        icmp_header->code = 0;
-        icmp_header->un.echo.id = getpid();
-        icmp_header->un.echo.sequence = packets_sent;
-        icmp_header->checksum = 0;
+        // Prepare ICMP header
+        icmp_header.type = ICMP_ECHO;
+        icmp_header.code = 0;
+        icmp_header.un.echo.id = getpid() & 0xFFFF;
+        icmp_header.un.echo.sequence = sequence;
+        
+        // Copy header to packet and fill data
+        memcpy(packet, &icmp_header, sizeof(icmp_header));
+        memset(packet + sizeof(icmp_header), 0x42, options->packet_size);
 
-        // Add payload
-        memset(packet + sizeof(struct icmphdr), 0xAA, options->packet_size - sizeof(struct icmphdr));
+        // Calculate and set checksum
+        icmp_header.checksum = calculate_checksum(packet, options->packet_size + sizeof(icmp_header));
+        memcpy(packet, &icmp_header, sizeof(icmp_header));
 
-        // Calculate checksum
-        icmp_header->checksum = calculate_checksum(packet, options->packet_size);
-
-        // Get start time
         gettimeofday(&start, NULL);
 
         // Send packet
-        ssize_t bytes_sent = sendto(sock_fd, packet, options->packet_size, 0, 
-                                    (struct sockaddr *)&target, sizeof(target));
+        ssize_t bytes_sent = sendto(sock_fd, packet, options->packet_size + sizeof(icmp_header), 0,
+                                  (struct sockaddr*)&dest_addr, sizeof(dest_addr));
         if (bytes_sent < 0) {
-            if (errno == EINTR) break;  // Interrupted by signal
-            perror("sendto");
+            if (errno == EINTR) break;
+            perror("ft_ping: sendto");
+            continue;
+        }
+        stats.packets_sent++;
+
+        // Receive reply
+        struct sockaddr_in recv_addr;
+        ssize_t bytes_received;
+        memset(recv_buffer, 0, sizeof(recv_buffer));
+        bytes_received = recvfrom(sock_fd, recv_buffer, sizeof(recv_buffer), 0,
+                                (struct sockaddr*)&recv_addr, &addr_len);
+
+        if (bytes_received < 0) {
+            if (errno != EINTR) {
+                printf("Request timeout for icmp_seq=%d\n", sequence);
+            }
+            sequence++;
             continue;
         }
 
-        packets_sent++;
-
-        // Receive response
-        struct sockaddr_in from;
-        socklen_t fromlen = sizeof(from);
-        char recv_packet[MAX_PACKET_SIZE];
-
-        ssize_t recv_bytes = recvfrom(sock_fd, recv_packet, sizeof(recv_packet), 0, 
-                                      (struct sockaddr *)&from, &fromlen);
-        
         gettimeofday(&end, NULL);
 
-        if (recv_bytes < 0) {
-            if (errno == EAGAIN || errno == EWOULDBLOCK) {
-                // Timeout, continue to next packet
-                if (options->verbose) {
-                    printf("Request timed out\n");
-                }
-                continue;
+        struct iphdr *ip_header = (struct iphdr*)recv_buffer;
+        struct icmphdr *icmp_reply = (struct icmphdr*)(recv_buffer + (ip_header->ihl * 4));
+
+        // For localhost, both ECHO and ECHOREPLY are valid responses
+        int valid_reply = (icmp_reply->type == ICMP_ECHOREPLY) ||
+                         (is_localhost && icmp_reply->type == ICMP_ECHO);
+
+        if (valid_reply && 
+            icmp_reply->un.echo.id == (getpid() & 0xFFFF) &&
+            icmp_reply->un.echo.sequence == sequence) {
+            double rtt = get_time_ms(&end) - get_time_ms(&start);
+            stats.packets_received++;
+            stats.rtt_sum += rtt;
+            stats.rtt_sum_sq += rtt * rtt;
+            stats.rtt_min = fmin(stats.rtt_min, rtt);
+            stats.rtt_max = fmax(stats.rtt_max, rtt);
+
+            printf("%zd bytes from %s: icmp_seq=%d ttl=%d time=%.3f ms\n",
+                   bytes_received - sizeof(struct iphdr),
+                   inet_ntoa(recv_addr.sin_addr),
+                   sequence,
+                   ip_header->ttl,
+                   rtt);
+
+            if (options->verbose) {
+                printf("ICMP: type=%d code=%d id=0x%04x seq=0x%04x\n",
+                       icmp_reply->type, icmp_reply->code,
+                       ntohs(icmp_reply->un.echo.id),
+                       ntohs(icmp_reply->un.echo.sequence));
             }
-            if (errno == EINTR) break;  // Interrupted by signal
-            perror("recvfrom");
-            continue;
         }
 
-        // Calculate round trip time
-        long long microseconds = (end.tv_sec - start.tv_sec) * 1000000 + 
-                                 (end.tv_usec - start.tv_usec);
-        double milliseconds = microseconds / 1000.0;
-
-        // Check if it's an ICMP Echo Reply
-        struct icmphdr *recv_icmp = (struct icmphdr *)(recv_packet + sizeof(struct iphdr));
-        if (recv_icmp->type == ICMP_ECHOREPLY && 
-            recv_icmp->un.echo.id == getpid() && 
-            recv_icmp->un.echo.sequence == packets_sent - 1) {
-            
-            packets_recv++;
-            
-            // Update RTT statistics
-            rtt_sum += milliseconds;
-            rtt_sum_sq += milliseconds * milliseconds;
-            
-            if (milliseconds < rtt_min) rtt_min = milliseconds;
-            if (milliseconds > rtt_max) rtt_max = milliseconds;
-
-            printf("64 bytes from %s: icmp_seq=%d ttl=%d time=%.3f ms\n", 
-                   inet_ntoa(from.sin_addr), 
-                   packets_sent - 1, 
-                   options->ttl, 
-                   milliseconds);
-        }
-
-        // Wait between packets
-        usleep(1000000);  // 1 second
+        sequence++;
+        usleep(1000000);  // Wait 1 second between pings
     }
 
-    // Calculate standard deviation
-    double rtt_avg = rtt_sum / packets_recv;
-    double rtt_stddev = ft_sqrt((rtt_sum_sq / packets_recv) - (rtt_avg * rtt_avg));
-
-    // Print summary
-    printf("\n--- %s ping statistics ---\n", options->target);
-    printf("%d packets transmitted, %d packets received, %d%% packet loss\n", 
-           packets_sent, packets_recv, 
-           packets_sent > 0 ? ((packets_sent - packets_recv) * 100) / packets_sent : 0);
-    
-    if (packets_recv > 0) {
-        printf("round-trip min/avg/max/stddev = %.3f/%.3f/%.3f/%.3f ms\n",
-               rtt_min, rtt_avg, rtt_max, rtt_stddev);
-    }
-
+    print_statistics(&stats, options->target);
     close(sock_fd);
     sock_fd = -1;
     return 0;
