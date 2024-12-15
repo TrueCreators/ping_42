@@ -22,8 +22,6 @@
 // Configuration constants
 #define MAX_PACKET_SIZE 65507   // Maximum packet size (IP header + ICMP header + data)
 #define DEFAULT_PACKET_SIZE 56  // Default size for ICMP data
-#define DEFAULT_TTL 10         // Default Time To Live value
-// Removed DEFAULT_COUNT as we now ping indefinitely by default
 
 // Program options structure
 typedef struct {
@@ -45,20 +43,11 @@ typedef struct {
 } t_ping_stats;
 
 // Function prototypes
-
-// Main ping function
 int send_ping(t_ping_options *options);
-
-// Options parsing and help
 int parse_options(int argc, char *argv[], t_ping_options *options);
 void print_help(const char *program_name);
-
-int ping_localhost(t_ping_options *options);
-
-// ICMP utilities
 unsigned short calculate_checksum(void *b, int len);
-
-// Signal handling
 void handle_signal(int signum);
+int ping_localhost(t_ping_options *options);
 
 #endif // FT_PING_H

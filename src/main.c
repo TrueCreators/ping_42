@@ -11,7 +11,7 @@ int main(int argc, char *argv[]) {
     // Initialize options with default values
     options.verbose = 0;
     options.packet_size = DEFAULT_PACKET_SIZE;
-    options.ttl = DEFAULT_TTL;
+    options.ttl = 64;  // Default TTL value
     options.target = NULL;
     options.count = 0;
 

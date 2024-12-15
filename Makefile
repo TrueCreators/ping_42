@@ -1,23 +1,30 @@
 NAME = ft_ping
+
 CC = gcc
-CFLAGS = -Wall -Wextra -Werror
-IFLAGS = -I./include
+CFLAGS = -Wall -Wextra -Werror -I./include
+LDFLAGS = -lm  # Adding math library
 
 SRC_DIR = src
 OBJ_DIR = obj
-SRCS = $(wildcard $(SRC_DIR)/*.c)
-OBJS = $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
+INC_DIR = include
+
+SRCS = $(SRC_DIR)/main.c \
+       $(SRC_DIR)/ping.c \
+       $(SRC_DIR)/options.c \
+	   $(SRC_DIR)/ping_localhost.c \
+
+OBJS = $(SRCS:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
 all: $(NAME)
 
-$(NAME): $(OBJS)
-	$(CC) $(CFLAGS) $(IFLAGS) -o $@ $^
+$(OBJ_DIR):
+	@mkdir -p $(OBJ_DIR)
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
-	$(CC) $(CFLAGS) $(IFLAGS) -c $< -o $@
+	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ_DIR):
-	mkdir -p $(OBJ_DIR)
+$(NAME): $(OBJS)
+	$(CC) $(OBJS) -o $(NAME) $(LDFLAGS)  # Changed order of flags
 
 clean:
 	rm -rf $(OBJ_DIR)

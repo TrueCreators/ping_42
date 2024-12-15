@@ -6,7 +6,7 @@ void print_help(const char *program_name) {
     printf("  -v                 verbose output\n");
     printf("  -c count           stop after sending count packets\n");
     printf("  -s packetsize      specify the number of data bytes to be sent\n");
-    printf("  -t, --ttl ttl      specify the IP Time To Live\n");
+    printf("  --ttl ttl          specify the IP Time To Live\n");
     printf("  -?                 print this help message\n");
 }
 
@@ -17,7 +17,7 @@ int parse_options(int argc, char *argv[], t_ping_options *options) {
     options->verbose = 0;
     options->count = 0;  // 0 means ping indefinitely
     options->packet_size = DEFAULT_PACKET_SIZE;
-    options->ttl = DEFAULT_TTL;
+    options->ttl = 64;  // Default TTL value of 64 instead of using a define
     options->target = NULL;
 
     for (i = 1; i < argc; i++) {
@@ -56,10 +56,9 @@ int parse_options(int argc, char *argv[], t_ping_options *options) {
                     return -1;
                 }
             }
-            else if (strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--ttl") == 0) {
+            else if (strcmp(argv[i], "--ttl") == 0) {  // Changed from -t to --ttl
                 if (++i >= argc) {
-                    fprintf(stderr, "ft_ping: option requires an argument -- '%s'\n", 
-                            argv[i-1][1] == '-' ? &argv[i-1][2] : &argv[i-1][1]);
+                    fprintf(stderr, "ft_ping: option requires an argument -- 'ttl'\n");
                     return -1;
                 }
                 options->ttl = atoi(argv[i]);
@@ -69,8 +68,7 @@ int parse_options(int argc, char *argv[], t_ping_options *options) {
                 }
             }
             else {
-                fprintf(stderr, "ft_ping: invalid option -- '%s'\n", 
-                        argv[i][1] == '-' ? &argv[i][2] : &argv[i][1]);
+                fprintf(stderr, "ft_ping: invalid option -- '%s'\n", argv[i]);
                 return -1;
             }
         }
